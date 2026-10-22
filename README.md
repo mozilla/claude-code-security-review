@@ -44,6 +44,8 @@ jobs:
 
 This action is not hardened against prompt injection attacks and should only be used to review trusted PRs. We recommend [configuring your repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories) to use the "Require approval for all external contributors" option to ensure workflows only run after a maintainer has reviewed the PR.
 
+Before Claude Code runs, the action **deletes every symlink in the checkout** (the workspace). A symlink committed in a PR could otherwise let Claude's search follow it out of the repository, for example to the process environment that holds the API key. Later steps in the same job see the checkout without its symlinks, so run the action in its own job, or check out again before steps that need them.
+
 ## Configuration Options
 
 ### Action Inputs
@@ -59,6 +61,7 @@ This action is not hardened against prompt injection attacks and should only be 
 | `run-every-commit` | Run ClaudeCode on every commit (skips cache check). Warning: May increase false positives on PRs with many commits. | `false` | No |
 | `false-positive-filtering-instructions` | Path to custom false positive filtering instructions text file | None | No |
 | `custom-security-scan-instructions` | Path to custom security scan instructions text file to append to audit prompt | None | No |
+| `static-analysis-findings-file` | Path to a JSON file (`{"findings": [...], "omitted": N}`) with static analysis findings on lines the PR changes, passed to Claude as leads | None | No |
 
 ### Action Outputs
 

@@ -93,7 +93,7 @@ async function run() {
     // Read the findings
     let newFindings = [];
     try {
-      const findingsData = fs.readFileSync('findings.json', 'utf8');
+      const findingsData = fs.readFileSync(process.env.FINDINGS_FILE || 'findings.json', 'utf8');
       newFindings = JSON.parse(findingsData);
     } catch (e) {
       console.log('Could not read findings file');

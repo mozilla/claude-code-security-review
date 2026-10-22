@@ -23,6 +23,9 @@ from claudecode.constants import (
     DEFAULT_CLAUDE_MODEL,
     EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
+    GITHUB_TOKEN_VARS,
+    MAX_STATIC_ANALYSIS_FINDINGS,
+    MAX_STATIC_ANALYSIS_MESSAGE_CHARS,
     SUBPROCESS_TIMEOUT
 )
 from claudecode.logger import get_logger
@@ -186,6 +189,27 @@ class GitHubActionClient:
         return ''.join(filtered_sections)
 
 
+def remove_symlinks(repo_dir: Path) -> int:
+    """Delete every symlink in the checkout before Claude Code runs.
+
+    The CLI only checks the paths named in a command, so a symlink committed in
+    the PR would let `grep -R .` follow it out of the checkout, for example to
+    /proc/self/environ, which holds the Anthropic key.
+
+    Returns:
+        Number of symlinks removed
+    """
+    removed = 0
+    for root, dirs, files in os.walk(repo_dir):  # never descends into linked directories
+        for name in dirs + files:
+            path = os.path.join(root, name)
+            if os.path.islink(path):
+                os.unlink(path)
+                removed += 1
+        dirs[:] = [d for d in dirs if os.path.isdir(os.path.join(root, d))]
+    return removed
+
+
 class SimpleClaudeRunner:
     """Simplified Claude Code runner for GitHub Actions."""
     
@@ -213,6 +237,14 @@ class SimpleClaudeRunner:
         if not repo_dir.exists():
             return False, f"Repository directory does not exist: {repo_dir}", {}
         
+        # Fail closed: never run Claude Code on a checkout that may still hold symlinks
+        try:
+            removed = remove_symlinks(repo_dir)
+        except OSError as e:
+            return False, f"Failed to remove symlinks from the checkout: {e}", {}
+        if removed:
+            print(f"[Info] Removed {removed} symlink(s) from the checkout before the audit", file=sys.stderr)
+        
         # Check prompt size
         prompt_size = len(prompt.encode('utf-8'))
         if prompt_size > 1024 * 1024:  # 1MB
@@ -225,8 +257,19 @@ class SimpleClaudeRunner:
                 'claude',
                 '--output-format', 'json',
                 '--model', DEFAULT_CLAUDE_MODEL,
-                '--disallowed-tools', 'Bash(ps:*)'
+                # The PR checkout is untrusted: expose only Read and Bash, and
+                # auto-deny every Bash command except search and listing. rg and
+                # find are left out because --pre and -exec run other programs.
+                '--tools', 'Read,Bash',
+                '--allowed-tools', 'Bash(grep:*),Bash(ls:*)',
+                '--permission-mode', 'dontAsk',
+                # Skip CLAUDE.md auto-discovery and hooks; --restricted also
+                # confines Read to the checkout and ignores settings files.
+                '--bare',
+                '--restricted'
             ]
+            # The CLI needs the Anthropic key but none of the GitHub tokens.
+            env = {k: v for k, v in os.environ.items() if k not in GITHUB_TOKEN_VARS}
             
             # Run Claude Code with retry logic
             NUM_RETRIES = 3
@@ -235,6 +278,7 @@ class SimpleClaudeRunner:
                     cmd,
                     input=prompt,  # Pass prompt via stdin
                     cwd=repo_dir,
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_seconds
@@ -518,6 +562,65 @@ def _is_finding_in_excluded_directory(finding: Dict[str, Any], github_client: Gi
     return github_client._is_excluded(file_path)
 
 
+def _line_number(value: Any) -> Optional[int]:
+    """Return value as a positive line number, or None (bools, NaN, Infinity, fractions)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():  # also rejects NaN and Infinity
+        return None
+    return int(value) if value >= 1 else None
+
+
+def load_static_analysis_findings(path: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Load static analysis findings to pass to Claude as leads.
+
+    The file holds {"findings": [...], "omitted": N}. Malformed entries are dropped
+    and any read or parse error returns no findings, so the review still runs.
+
+    Returns:
+        Tuple of (findings, number of findings omitted by the caller or the cap)
+    """
+    if not path:
+        return [], 0
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read static analysis findings file {path}: {e}")
+        return [], 0
+    if not isinstance(data, dict) or not isinstance(data.get('findings'), list):
+        logger.warning(f"Ignoring static analysis findings file {path}: unexpected format")
+        return [], 0
+
+    findings = []
+    for entry in data['findings']:
+        if not isinstance(entry, dict):
+            continue
+        start_line = _line_number(entry.get('start_line'))
+        if start_line is None:
+            continue
+        end_line = _line_number(entry.get('end_line'))
+        try:
+            findings.append({
+                'tool': str(entry['tool'])[:50],
+                'rule_id': str(entry['rule_id'])[:200],
+                'severity': str(entry.get('severity', ''))[:20],
+                'path': str(entry['path'])[:500],
+                'start_line': start_line,
+                'end_line': end_line if end_line is not None and end_line >= start_line else start_line,
+                'message': str(entry.get('message', ''))[:MAX_STATIC_ANALYSIS_MESSAGE_CHARS],
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    omitted = data.get('omitted', 0)
+    if isinstance(omitted, bool) or not isinstance(omitted, (int, float)):
+        omitted = 0
+    omitted = max(0, int(omitted))
+    omitted += max(0, len(findings) - MAX_STATIC_ANALYSIS_FINDINGS)
+    return findings[:MAX_STATIC_ANALYSIS_FINDINGS], omitted
+
+
 def main():
     """Main execution function for GitHub Action."""
     try:
@@ -550,6 +653,13 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to read security scan instructions file {scan_file}: {e}")
         
+        # Load static analysis findings (e.g. Semgrep) to pass to Claude as leads
+        findings_file = os.environ.get('STATIC_ANALYSIS_FINDINGS_FILE', '')
+        static_analysis_findings, omitted_findings = load_static_analysis_findings(findings_file)
+        if findings_file:
+            logger.info(f"Loaded {len(static_analysis_findings)} static analysis finding(s) from {findings_file}"
+                        f" ({omitted_findings} omitted)")
+        
         # Initialize components
         try:
             github_client, claude_runner = initialize_clients()
@@ -579,7 +689,9 @@ def main():
             sys.exit(EXIT_GENERAL_ERROR)
                 
         # Generate security audit prompt
-        prompt = get_security_audit_prompt(pr_data, pr_diff, custom_scan_instructions=custom_scan_instructions)
+        prompt = get_security_audit_prompt(pr_data, pr_diff, custom_scan_instructions=custom_scan_instructions,
+                                           static_analysis_findings=static_analysis_findings,
+                                           omitted_findings=omitted_findings)
         
         # Run Claude Code security audit
         # Get repo directory from environment or use current directory
@@ -590,7 +702,9 @@ def main():
         # If prompt is too long, retry without diff
         if not success and error_msg == "PROMPT_TOO_LONG":
             print(f"[Info] Prompt too long, retrying without diff. Original prompt length: {len(prompt)} characters", file=sys.stderr)
-            prompt_without_diff = get_security_audit_prompt(pr_data, pr_diff, include_diff=False, custom_scan_instructions=custom_scan_instructions)
+            prompt_without_diff = get_security_audit_prompt(pr_data, pr_diff, include_diff=False, custom_scan_instructions=custom_scan_instructions,
+                                                            static_analysis_findings=static_analysis_findings,
+                                                            omitted_findings=omitted_findings)
             print(f"[Info] New prompt length: {len(prompt_without_diff)} characters", file=sys.stderr)
             success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt_without_diff)
         

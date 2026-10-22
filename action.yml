@@ -48,6 +48,11 @@ inputs:
     required: false
     default: ''
 
+  static-analysis-findings-file:
+    description: 'Path to a JSON file with static analysis findings on lines the PR changes, passed to Claude as leads'
+    required: false
+    default: ''
+
 outputs:
   findings-count:
     description: 'Number of security findings'
@@ -158,7 +163,7 @@ runs:
       if: steps.claudecode-check.outputs.enable_claudecode == 'true'
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 pinned to commit hash
       with:
-        node-version: '18'
+        node-version: '22' # claude-code requires Node >= 22
     
     - name: Install dependencies
       shell: bash
@@ -168,7 +173,9 @@ runs:
         echo "::group::Install Deps"
         if [ "${{ steps.claudecode-check.outputs.enable_claudecode }}" == "true" ]; then
           pip install -r "$ACTION_PATH/claudecode/requirements.txt"
-          npm install -g @anthropic-ai/claude-code
+          # Pinned: the audit relies on this version's tool set (no Grep/Glob tools)
+          # and on --tools, --permission-mode dontAsk, --bare and --restricted
+          npm install -g @anthropic-ai/claude-code@2.1.308
         fi
         sudo apt-get update && sudo apt-get install -y jq
         echo "::endgroup::"
@@ -186,6 +193,7 @@ runs:
         EXCLUDE_DIRECTORIES: ${{ inputs.exclude-directories }}
         FALSE_POSITIVE_FILTERING_INSTRUCTIONS: ${{ inputs.false-positive-filtering-instructions }}
         CUSTOM_SECURITY_SCAN_INSTRUCTIONS: ${{ inputs.custom-security-scan-instructions }}
+        STATIC_ANALYSIS_FINDINGS_FILE: ${{ inputs.static-analysis-findings-file }}
         CLAUDE_MODEL: ${{ inputs.claude-model }}
         CLAUDECODE_TIMEOUT: ${{ inputs.claudecode-timeout }}
         ACTION_PATH: ${{ github.action_path }}
@@ -279,6 +287,9 @@ runs:
               
               # Also create findings.json for PR comment script
               jq '.findings // []' claudecode/claudecode-results.json > findings.json || echo '[]' > findings.json
+              # Only a completed scan may comment: on any other path the workspace
+              # could hold a findings.json committed in the PR itself.
+              echo "scan_succeeded=true" >> $GITHUB_OUTPUT
             fi
           fi
         else
@@ -318,13 +329,16 @@ runs:
         if-no-files-found: ignore
     
     - name: Comment PR with findings
-      if: github.event_name == 'pull_request' && inputs.comment-pr == 'true' && steps.claudecode-check.outputs.enable_claudecode == 'true'
+      if: github.event_name == 'pull_request' && inputs.comment-pr == 'true' && steps.claudecode-check.outputs.enable_claudecode == 'true' && steps.claudecode-scan.outputs.scan_succeeded == 'true'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
         CLAUDECODE_FINDINGS: ${{ steps.claudecode-scan.outputs.findings_count }}
         SILENCE_CLAUDECODE_COMMENTS: ${{ steps.claudecode-check.outputs.silence_claudecode_comments }}
         ACTION_PATH: ${{ github.action_path }}
+        # The scan's own output, not the workspace copy: the workspace is the PR
+        # checkout and can hold a findings.json committed in the PR.
+        FINDINGS_FILE: ${{ github.action_path }}/findings.json
       run: |
         node "$ACTION_PATH/scripts/comment-pr-findings.js"
 

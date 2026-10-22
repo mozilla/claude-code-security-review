@@ -9,10 +9,20 @@ import subprocess
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-from claudecode.github_action_audit import SimpleClaudeRunner
+import pytest
+
+from claudecode.github_action_audit import SimpleClaudeRunner, remove_symlinks
 from claudecode.constants import DEFAULT_CLAUDE_MODEL
 
 
+@pytest.fixture
+def skip_symlink_removal():
+    """These tests pass a fake repo path; never walk or delete anything there."""
+    with patch('claudecode.github_action_audit.remove_symlinks', return_value=0) as mock_remove:
+        yield mock_remove
+
+
+@pytest.mark.usefixtures('skip_symlink_removal')
 class TestSimpleClaudeRunner:
     """Test SimpleClaudeRunner functionality."""
     
@@ -167,10 +177,35 @@ class TestSimpleClaudeRunner:
             'claude',
             '--output-format', 'json',
             '--model', DEFAULT_CLAUDE_MODEL,
-            '--disallowed-tools', 'Bash(ps:*)'
+            '--tools', 'Read,Bash',
+            '--allowed-tools', 'Bash(grep:*),Bash(ls:*)',
+            '--permission-mode', 'dontAsk',
+            '--bare',
+            '--restricted'
         ]
         assert call_args[1]['input'] == 'test prompt'
         assert call_args[1]['cwd'] == Path('/tmp/test')
+
+    @patch('subprocess.run')
+    def test_run_security_audit_drops_github_tokens(self, mock_run):
+        """The CLI keeps the Anthropic key but gets no GitHub credentials."""
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps({"result": json.dumps({"findings": []})}),
+            stderr=''
+        )
+        secrets = {
+            'ANTHROPIC_API_KEY': 'test-key',
+            'GITHUB_TOKEN': 'ghs_test',
+            'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'oidc-test',
+        }
+        with patch.dict(os.environ, secrets), patch('pathlib.Path.exists', return_value=True):
+            SimpleClaudeRunner().run_security_audit(Path('/tmp/test'), "test prompt")
+
+        env = mock_run.call_args[1]['env']
+        assert env['ANTHROPIC_API_KEY'] == 'test-key'
+        assert 'GITHUB_TOKEN' not in env
+        assert 'ACTIONS_ID_TOKEN_REQUEST_TOKEN' not in env
     
     @patch('subprocess.run')
     def test_run_security_audit_large_prompt_warning(self, mock_run, capsys):
@@ -366,6 +401,7 @@ class TestSimpleClaudeRunner:
         assert not hasattr(runner, '_create_findings_from_text')
 
 
+@pytest.mark.usefixtures('skip_symlink_removal')
 class TestClaudeRunnerEdgeCases:
     """Test edge cases and error scenarios."""
     
@@ -437,3 +473,62 @@ class TestClaudeRunnerEdgeCases:
         assert success is False
         assert 'Unexpected error' in error
         assert results == {}
+
+
+class TestRemoveSymlinks:
+    """Test symlink removal from the checkout before Claude Code runs."""
+
+    @pytest.fixture
+    def layout(self, tmp_path):
+        """A repo with every kind of symlink, plus a directory outside it."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("secret\n")
+        repo = tmp_path / "repo"
+        (repo / "src" / "nested").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("print('hi')\n")
+        (repo / "env-link").symlink_to("/proc/self/environ")
+        (repo / "out-file").symlink_to(outside / "secret.txt")
+        (repo / "src" / "out-dir").symlink_to(outside, target_is_directory=True)
+        (repo / "src" / "nested" / "dangling").symlink_to(tmp_path / "missing")
+        (repo / "src" / "nested" / "relative").symlink_to("../app.py")
+        return repo, outside
+
+    def test_removes_all_symlinks_and_keeps_files(self, layout):
+        repo, outside = layout
+
+        assert remove_symlinks(repo) == 5
+
+        assert not any(p.is_symlink() for p in repo.rglob("*"))
+        assert (repo / "src" / "app.py").read_text() == "print('hi')\n"
+        # The linked directory itself was not touched
+        assert (outside / "secret.txt").read_text() == "secret\n"
+
+    def test_no_symlinks(self, tmp_path):
+        (tmp_path / "app.py").write_text("x = 1\n")
+        assert remove_symlinks(tmp_path) == 0
+        assert (tmp_path / "app.py").exists()
+
+    @patch('subprocess.run')
+    def test_audit_runs_only_after_symlinks_are_gone(self, mock_run, layout):
+        repo, _ = layout
+        seen = {}
+
+        def run(*args, **kwargs):
+            seen['symlinks'] = [p for p in repo.rglob("*") if p.is_symlink()]
+            return Mock(returncode=0, stdout=json.dumps({"findings": []}), stderr="")
+
+        mock_run.side_effect = run
+        success, _, _ = SimpleClaudeRunner().run_security_audit(repo, "test prompt")
+
+        assert success is True
+        assert seen['symlinks'] == []
+
+    @patch('subprocess.run')
+    def test_audit_fails_closed_when_removal_fails(self, mock_run, tmp_path):
+        with patch('claudecode.github_action_audit.remove_symlinks', side_effect=OSError("read-only")):
+            success, error, _ = SimpleClaudeRunner().run_security_audit(tmp_path, "test prompt")
+
+        assert success is False
+        assert "Failed to remove symlinks" in error
+        mock_run.assert_not_called()

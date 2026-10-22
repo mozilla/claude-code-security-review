@@ -277,6 +277,60 @@ class TestMainFunction:
             assert output['repo'] == 'owner/repo'
             assert len(output['findings']) == 0
             assert output['filtering_summary']['total_original_findings'] == 0
+
+    @patch('pathlib.Path.cwd')
+    @patch('claudecode.github_action_audit.get_security_audit_prompt')
+    @patch('claudecode.github_action_audit.FindingsFilter')
+    @patch('claudecode.github_action_audit.SimpleClaudeRunner')
+    @patch('claudecode.github_action_audit.GitHubActionClient')
+    def test_main_passes_static_analysis_findings(self, mock_client_class, mock_runner_class,
+                                                  mock_filter_class, mock_prompt_func,
+                                                  mock_cwd, tmp_path, capsys):
+        """Test that static analysis findings from the file reach the prompt."""
+        finding = {
+            'tool': 'semgrep',
+            'rule_id': 'python.flask.security.injection.tainted-sql-string.tainted-sql-string',
+            'severity': 'error',
+            'path': 'src/app.py',
+            'start_line': 12,
+            'end_line': 12,
+            'message': 'Detected user input used to manually construct a SQL string.'
+        }
+        findings_file = tmp_path / 'semgrep-findings.json'
+        findings_file.write_text(json.dumps({'findings': [finding], 'omitted': 2}))
+
+        mock_client = Mock()
+        mock_client.get_pr_data.return_value = {'number': 123, 'title': 'Test PR', 'body': ''}
+        mock_client.get_pr_diff.return_value = "diff content"
+        mock_client_class.return_value = mock_client
+
+        mock_runner = Mock()
+        mock_runner.validate_claude_available.return_value = (True, "")
+        mock_runner.run_security_audit.return_value = (True, "", {'findings': [], 'analysis_summary': {}})
+        mock_runner_class.return_value = mock_runner
+
+        mock_filter = Mock()
+        mock_filter.filter_findings.return_value = (
+            True, {'filtered_findings': [], 'excluded_findings': [], 'analysis_summary': {}}, Mock()
+        )
+        mock_filter_class.return_value = mock_filter
+
+        mock_prompt_func.return_value = "security prompt"
+        mock_cwd.return_value = Path('/tmp/repo')
+
+        with patch.dict(os.environ, {
+            'GITHUB_REPOSITORY': 'owner/repo',
+            'PR_NUMBER': '123',
+            'GITHUB_TOKEN': 'test-token',
+            'STATIC_ANALYSIS_FINDINGS_FILE': str(findings_file)
+        }):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+            assert exc_info.value.code == 0
+            kwargs = mock_prompt_func.call_args.kwargs
+            assert kwargs['static_analysis_findings'] == [finding]
+            assert kwargs['omitted_findings'] == 2
     
     @patch('pathlib.Path.cwd')
     @patch('claudecode.github_action_audit.get_security_audit_prompt')
