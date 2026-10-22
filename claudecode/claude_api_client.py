@@ -10,7 +10,7 @@ from anthropic import Anthropic
 
 from claudecode.constants import (
     DEFAULT_CLAUDE_MODEL, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES,
-    RATE_LIMIT_BACKOFF_MAX, PROMPT_TOKEN_LIMIT,
+    RATE_LIMIT_BACKOFF_MAX, PROMPT_TOKEN_LIMIT, VALIDATION_TIMEOUT_SECONDS,
 )
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
@@ -57,12 +57,12 @@ class ClaudeAPIClient:
             Tuple of (success, error_message)
         """
         try:
-            # Simple test call to verify API access
+            # A one-token call to the configured model also catches spend limits
             self.client.messages.create(
-                model="claude-3-5-haiku-20241022",
-                max_tokens=10,
+                model=self.model,
+                max_tokens=1,
                 messages=[{"role": "user", "content": "Hello"}],
-                timeout=10
+                timeout=VALIDATION_TIMEOUT_SECONDS
             )
             logger.info("Claude API access validated successfully")
             return True, ""
@@ -320,16 +320,12 @@ Respond with EXACTLY this JSON structure (no markdown, no code blocks):
             Tuple of (success, formatted_content, error_message)
         """
         try:
-            # Check if REPO_PATH is set and use it as base path
-            repo_path = os.environ.get('REPO_PATH')
-            if repo_path:
-                # Convert file_path to Path and check if it's absolute
-                path = Path(file_path)
-                if not path.is_absolute():
-                    # Make it relative to REPO_PATH
-                    path = Path(repo_path) / file_path
-            else:
-                path = Path(file_path)
+            # Finding paths come from the audit of untrusted code: only read
+            # files inside the repository (REPO_PATH, or the working directory).
+            repo_root = Path(os.environ.get('REPO_PATH') or os.getcwd()).resolve()
+            path = (repo_root / file_path).resolve()
+            if not path.is_relative_to(repo_root):
+                return False, "", f"Path is outside the repository: {file_path}"
             
             if not path.exists():
                 return False, "", f"File not found: {path}"

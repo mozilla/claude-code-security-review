@@ -23,6 +23,7 @@ from claudecode.constants import (
     DEFAULT_CLAUDE_MODEL,
     EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
+    GITHUB_TOKEN_VARS,
     SUBPROCESS_TIMEOUT
 )
 from claudecode.logger import get_logger
@@ -225,8 +226,19 @@ class SimpleClaudeRunner:
                 'claude',
                 '--output-format', 'json',
                 '--model', DEFAULT_CLAUDE_MODEL,
-                '--disallowed-tools', 'Bash(ps:*)'
+                # The PR checkout is untrusted: expose only Read and Bash, and
+                # auto-deny every Bash command except search and listing. rg and
+                # find are left out because --pre and -exec run other programs.
+                '--tools', 'Read,Bash',
+                '--allowed-tools', 'Bash(grep:*),Bash(ls:*)',
+                '--permission-mode', 'dontAsk',
+                # Skip CLAUDE.md auto-discovery and hooks; --restricted also
+                # confines Read to the checkout and ignores settings files.
+                '--bare',
+                '--restricted'
             ]
+            # The CLI needs the Anthropic key but none of the GitHub tokens.
+            env = {k: v for k, v in os.environ.items() if k not in GITHUB_TOKEN_VARS}
             
             # Run Claude Code with retry logic
             NUM_RETRIES = 3
@@ -235,6 +247,7 @@ class SimpleClaudeRunner:
                     cmd,
                     input=prompt,  # Pass prompt via stdin
                     cwd=repo_dir,
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_seconds

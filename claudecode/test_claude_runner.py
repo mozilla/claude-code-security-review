@@ -167,10 +167,35 @@ class TestSimpleClaudeRunner:
             'claude',
             '--output-format', 'json',
             '--model', DEFAULT_CLAUDE_MODEL,
-            '--disallowed-tools', 'Bash(ps:*)'
+            '--tools', 'Read,Bash',
+            '--allowed-tools', 'Bash(grep:*),Bash(ls:*)',
+            '--permission-mode', 'dontAsk',
+            '--bare',
+            '--restricted'
         ]
         assert call_args[1]['input'] == 'test prompt'
         assert call_args[1]['cwd'] == Path('/tmp/test')
+
+    @patch('subprocess.run')
+    def test_run_security_audit_drops_github_tokens(self, mock_run):
+        """The CLI keeps the Anthropic key but gets no GitHub credentials."""
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=json.dumps({"result": json.dumps({"findings": []})}),
+            stderr=''
+        )
+        secrets = {
+            'ANTHROPIC_API_KEY': 'test-key',
+            'GITHUB_TOKEN': 'ghs_test',
+            'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'oidc-test',
+        }
+        with patch.dict(os.environ, secrets), patch('pathlib.Path.exists', return_value=True):
+            SimpleClaudeRunner().run_security_audit(Path('/tmp/test'), "test prompt")
+
+        env = mock_run.call_args[1]['env']
+        assert env['ANTHROPIC_API_KEY'] == 'test-key'
+        assert 'GITHUB_TOKEN' not in env
+        assert 'ACTIONS_ID_TOKEN_REQUEST_TOKEN' not in env
     
     @patch('subprocess.run')
     def test_run_security_audit_large_prompt_warning(self, mock_run, capsys):
