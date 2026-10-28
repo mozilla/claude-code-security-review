@@ -260,7 +260,12 @@ You MUST output your findings as structured JSON with this exact schema:
       "description": "User input passed to SQL query without parameterization",
       "exploit_scenario": "Attacker could extract database contents by manipulating the 'search' parameter with SQL injection payloads like '1; DROP TABLE users--'",
       "recommendation": "Replace string formatting with parameterized queries using SQLAlchemy or equivalent",
-      "confidence": 0.95
+      "confidence": 0.95,
+      "suggested_fix": {{
+        "start_line": 42,
+        "end_line": 42,
+        "replacement": "    rows = db.execute(\\"SELECT * FROM users WHERE name = ?\\", (search,))"
+      }}
     }}
   ],
   "analysis_summary": {{
@@ -271,6 +276,15 @@ You MUST output your findings as structured JSON with this exact schema:
     "review_completed": true,
   }}
 }}
+
+SUGGESTED FIX (optional, per finding):
+Include "suggested_fix" only when the fix fits in one contiguous range of lines that this PR adds,
+and that range includes the finding's "line". "start_line" and "end_line" are line numbers in the
+PR's version of the file; "replacement" is the exact new code for that whole range, with the file's
+indentation, lines separated by "\\n". It replaces those lines one for one in a suggested change the
+developer can commit, so it must be complete and correct on its own. Leave "suggested_fix" out when
+the fix needs changes anywhere else (for example a new import or another file), or when you are not
+sure the fix is right.
 
 SEVERITY GUIDELINES:
 - **HIGH**: Directly exploitable vulnerabilities leading to RCE, data breach, or authentication bypass

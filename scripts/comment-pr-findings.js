@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { planSuggestions, findingMarker } = require('./suggestions');
 
 // Parse GitHub context from environment
 const context = {
@@ -125,8 +126,11 @@ async function run() {
     }
     
     
+    // Committable fixes, where the finding's fix fits in lines the PR adds
+    const suggestions = planSuggestions(newFindings, fileMap);
+    
     // Process findings synchronously (gh cli doesn't support async well)
-    for (const finding of newFindings) {
+    for (const [index, finding] of newFindings.entries()) {
       const file = finding.file || finding.path;
       const line = finding.line || (finding.start && finding.start.line) || 1;
       const message = finding.description || (finding.extra && finding.extra.message) || 'Security vulnerability detected';
@@ -157,13 +161,25 @@ async function run() {
         commentBody += `\n**Recommendation:** ${recommendation}\n`;
       }
       
+      // A suggestion replaces the lines the comment spans, so the comment is
+      // anchored to the fix's range instead of the finding's single line.
+      const suggestion = suggestions.get(index);
+      if (suggestion) {
+        commentBody += `\n${suggestion.block}\n`;
+      }
+      commentBody += `\n${findingMarker(finding, fileMap, context.payload.pull_request.head.sha)}\n`;
+      
       // Prepare the review comment
       const reviewComment = {
         path: file,
-        line: line,
+        line: suggestion ? suggestion.end : line,
         side: 'RIGHT',
         body: commentBody
       };
+      if (suggestion && suggestion.start !== suggestion.end) {
+        reviewComment.start_line = suggestion.start;
+        reviewComment.start_side = 'RIGHT';
+      }
       
       reviewComments.push(reviewComment);
     }
@@ -220,6 +236,10 @@ async function run() {
             body: comment.body,
             commit_id: context.payload.pull_request.head.sha
           };
+          if (comment.start_line) {
+            commentData.start_line = comment.start_line;
+            commentData.start_side = comment.start_side;
+          }
           
           const commentResponse = ghApi(`/repos/${context.repo.owner}/${context.repo.repo}/pulls/${context.issue.number}/comments`, 'POST', commentData);
           

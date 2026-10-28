@@ -5,6 +5,7 @@ Unit tests for findings conversion and edge cases.
 
 import pytest
 import json
+from unittest.mock import MagicMock
 
 from claudecode.findings_filter import FindingsFilter, HardExclusionRules
 from claudecode.json_parser import parse_json_with_fallbacks, extract_json_from_text
@@ -85,6 +86,23 @@ class TestFindingsConversionEdgeCases:
         assert kept[0]['extra_field'] == 'value'
         assert kept[0]['nested'] == {'data': 'here'}
     
+    def test_suggested_fix_survives_filtering(self):
+        """The committable fix reaches findings.json on both filter paths."""
+        fix = {'start_line': 17, 'end_line': 17, 'replacement': '    rows = db.execute("... = ?", (name,))'}
+        findings = [{'file': 'src/app.py', 'line': 17, 'severity': 'HIGH', 'category': 'sql_injection',
+                     'description': 'SQL injection', 'suggested_fix': fix}]
+
+        kept, _ = filter_findings_simple(create_simple_filter(), findings)
+        assert kept[0]['suggested_fix'] == fix
+
+        claude_filter = create_simple_filter()
+        claude_filter.use_claude_filtering = True
+        claude_filter.claude_client = MagicMock()
+        claude_filter.claude_client.analyze_single_finding.return_value = (
+            True, {'keep_finding': True, 'confidence_score': 9.0, 'justification': 'real'}, '')
+        kept, _ = filter_findings_simple(claude_filter, findings)
+        assert kept[0]['suggested_fix'] == fix
+
     def test_unicode_in_findings(self):
         """Test findings with unicode characters."""
         findings = [

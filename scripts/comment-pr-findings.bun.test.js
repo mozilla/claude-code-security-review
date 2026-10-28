@@ -568,4 +568,94 @@ describe('comment-pr-findings.js', () => {
       expect(consoleLogSpy).toHaveBeenCalledWith('No findings to comment on PR diff');
     });
   });
+
+  describe('Committable Suggestions', () => {
+    // Lines 11-13 of src/app.py are context, 14-18 are added by the PR.
+    const patch = [
+      '@@ -11,3 +11,8 @@ def get_db():',
+      '     return sqlite3.connect("app.db")',
+      ' ',
+      ' ',
+      '+@app.get("/users/search")',
+      '+def search_users():',
+      '+    name = request.args.get("name", "")',
+      '+    rows = get_db().execute("SELECT id, name FROM users WHERE name = \'" + name + "\'").fetchall()',
+      '+    return jsonify([{"id": row[0], "name": row[1]} for row in rows])',
+    ].join('\n');
+    const fixed = '    rows = get_db().execute("SELECT id, name FROM users WHERE name = ?", (name,)).fetchall()';
+
+    function runWith(findings) {
+      readFileSyncSpy.mockImplementation((path) => {
+        if (path.includes('github-event.json')) {
+          return JSON.stringify({ pull_request: { number: 123, head: { sha: 'abc123' } } });
+        }
+        if (path === 'findings.json') {
+          return JSON.stringify(findings);
+        }
+      });
+      const captured = { review: null };
+      spawnSyncSpy.mockImplementation((cmd, args, options) => {
+        const endpoint = args[1];
+        const method = args[args.indexOf('--method') + 1] || 'GET';
+        if (endpoint.includes('/pulls/123/files')) {
+          return { status: 0, stdout: JSON.stringify([{ filename: 'src/app.py', patch }]), stderr: '' };
+        }
+        if (endpoint.includes('/pulls/123/comments') && method === 'GET') {
+          return { status: 0, stdout: '[]', stderr: '' };
+        }
+        if (endpoint.includes('/pulls/123/reviews') && method === 'POST') {
+          captured.review = JSON.parse(options.input);
+        }
+        return { status: 0, stdout: '{}', stderr: '' };
+      });
+      return captured;
+    }
+
+    test('single-line fix becomes a suggestion on the finding line', async () => {
+      const captured = runWith([{
+        file: 'src/app.py', line: 17, category: 'sql_injection', description: 'SQL injection',
+        suggested_fix: { start_line: 17, end_line: 17, replacement: fixed },
+      }]);
+
+      await import('./comment-pr-findings.js');
+
+      const comment = captured.review.comments[0];
+      expect(comment.line).toBe(17);
+      expect(comment.start_line).toBeUndefined();
+      expect(comment.body).toContain('```suggestion\n' + fixed + '\n```');
+      expect(comment.body).toMatch(/<!-- ai-security-review:finding id=[0-9a-f]{8} category=sql_injection sha=abc123 -->/);
+    });
+
+    test('multi-line fix spans the comment over the range', async () => {
+      const replacement = '    name = request.args.get("name", "")\n' + fixed;
+      const captured = runWith([{
+        file: 'src/app.py', line: 17, category: 'sql_injection', description: 'SQL injection',
+        suggested_fix: { start_line: 16, end_line: 17, replacement },
+      }]);
+
+      await import('./comment-pr-findings.js');
+
+      const comment = captured.review.comments[0];
+      expect(comment.start_line).toBe(16);
+      expect(comment.start_side).toBe('RIGHT');
+      expect(comment.line).toBe(17);
+      expect(comment.body).toContain('```suggestion\n' + replacement + '\n```');
+    });
+
+    test('a fix outside the added lines keeps a text-only comment', async () => {
+      const captured = runWith([{
+        file: 'src/app.py', line: 17, category: 'sql_injection', description: 'SQL injection',
+        recommendation: 'Use a parameterized query',
+        suggested_fix: { start_line: 1, end_line: 17, replacement: 'import x\n' + fixed },
+      }]);
+
+      await import('./comment-pr-findings.js');
+
+      const comment = captured.review.comments[0];
+      expect(comment.line).toBe(17);
+      expect(comment.body).not.toContain('suggestion');
+      expect(comment.body).toContain('**Recommendation:** Use a parameterized query');
+      expect(comment.body).toContain('<!-- ai-security-review:finding id=');
+    });
+  });
 });
