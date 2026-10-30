@@ -64,8 +64,37 @@ class TestSimpleClaudeRunner:
             success, error = runner.validate_claude_available()
         
         assert success is False
-        assert 'ANTHROPIC_API_KEY environment variable is not set' in error
+        assert 'No Anthropic credentials configured' in error
     
+    @patch('subprocess.run')
+    def test_validate_claude_available_workload_identity(self, mock_run):
+        """Federation variables plus an identity token count as credentials."""
+        mock_run.return_value = Mock(returncode=0, stdout='claude version 1.0.0', stderr='')
+        env = {
+            'ANTHROPIC_FEDERATION_RULE_ID': 'fdrl_1',
+            'ANTHROPIC_ORGANIZATION_ID': 'org',
+            'ANTHROPIC_SERVICE_ACCOUNT_ID': 'svac_1',
+            'ANTHROPIC_IDENTITY_TOKEN_FILE': '/tmp/jwt',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            success, error = SimpleClaudeRunner().validate_claude_available()
+        assert success is True
+        assert error == ''
+
+    @patch('subprocess.run')
+    def test_validate_claude_available_federation_without_identity_token(self, mock_run):
+        """The IDs alone fail validation here, not later at the first API call."""
+        mock_run.return_value = Mock(returncode=0, stdout='claude version 1.0.0', stderr='')
+        env = {
+            'ANTHROPIC_FEDERATION_RULE_ID': 'fdrl_1',
+            'ANTHROPIC_ORGANIZATION_ID': 'org',
+            'ANTHROPIC_SERVICE_ACCOUNT_ID': 'svac_1',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            success, error = SimpleClaudeRunner().validate_claude_available()
+        assert success is False
+        assert 'No Anthropic credentials configured' in error
+
     @patch('subprocess.run')
     def test_validate_claude_available_not_installed(self, mock_run):
         """Test Claude validation when not installed."""

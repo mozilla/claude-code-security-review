@@ -29,6 +29,25 @@ from claudecode.logger import get_logger
 
 logger = get_logger(__name__)
 
+def has_anthropic_credentials() -> bool:
+    """Whether the environment holds a usable Anthropic credential.
+
+    A static key or token, or the complete Workload Identity Federation set
+    that the Anthropic SDK and Claude CLI resolve on their own: the rule,
+    organization and service account IDs plus an identity token (or its file).
+    """
+    if os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN'):
+        return True
+    federation_ids = (
+        'ANTHROPIC_FEDERATION_RULE_ID',
+        'ANTHROPIC_ORGANIZATION_ID',
+        'ANTHROPIC_SERVICE_ACCOUNT_ID',
+    )
+    identity_token = (os.environ.get('ANTHROPIC_IDENTITY_TOKEN')
+                      or os.environ.get('ANTHROPIC_IDENTITY_TOKEN_FILE'))
+    return bool(identity_token and all(os.environ.get(var) for var in federation_ids))
+
+
 class ConfigurationError(ValueError):
     """Raised when configuration is invalid or missing."""
     pass
@@ -323,10 +342,14 @@ class SimpleClaudeRunner:
             )
             
             if result.returncode == 0:
-                # Also check if API key is configured
-                api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-                if not api_key:
-                    return False, "ANTHROPIC_API_KEY environment variable is not set"
+                if not has_anthropic_credentials():
+                    return False, (
+                        "No Anthropic credentials configured. Set ANTHROPIC_API_KEY, "
+                        "or configure Workload Identity Federation "
+                        "(ANTHROPIC_FEDERATION_RULE_ID / ANTHROPIC_ORGANIZATION_ID / "
+                        "ANTHROPIC_SERVICE_ACCOUNT_ID plus ANTHROPIC_IDENTITY_TOKEN or "
+                        "ANTHROPIC_IDENTITY_TOKEN_FILE)."
+                    )
                 return True, ""
             else:
                 error_msg = f"Claude Code returned exit code {result.returncode}"
@@ -409,14 +432,14 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     try:
         # Check if we should use Claude API filtering
         use_claude_filtering = os.environ.get('ENABLE_CLAUDE_FILTERING', 'false').lower() == 'true'
-        api_key = os.environ.get('ANTHROPIC_API_KEY')
         
-        if use_claude_filtering and api_key:
-            # Use full filtering with Claude API
+        if use_claude_filtering and has_anthropic_credentials():
+            # Use full filtering with Claude API. The client reads ANTHROPIC_API_KEY
+            # itself and otherwise lets the SDK resolve keyless credentials.
             return FindingsFilter(
                 use_hard_exclusions=True,
                 use_claude_filtering=True,
-                api_key=api_key,
+                api_key=os.environ.get('ANTHROPIC_API_KEY'),
                 custom_filtering_instructions=custom_filtering_instructions
             )
         else:
