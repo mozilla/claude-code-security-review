@@ -158,7 +158,7 @@ runs:
       if: steps.claudecode-check.outputs.enable_claudecode == 'true'
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 pinned to commit hash
       with:
-        node-version: '18'
+        node-version: '22' # @anthropic-ai/claude-code requires Node >= 22
     
     - name: Install dependencies
       shell: bash
@@ -168,7 +168,10 @@ runs:
         echo "::group::Install Deps"
         if [ "${{ steps.claudecode-check.outputs.enable_claudecode }}" == "true" ]; then
           pip install -r "$ACTION_PATH/claudecode/requirements.txt"
-          npm install -g @anthropic-ai/claude-code
+          # Pinned (npm 'stable' tag at the time): newer models need a recent CLI
+          # (claude-opus-5-5 needs >= 2.1.280), and an unpinned install is not reproducible.
+          npm install -g @anthropic-ai/claude-code@2.1.311
+          claude --version
         fi
         sudo apt-get update && sudo apt-get install -y jq
         echo "::endgroup::"

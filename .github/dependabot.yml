@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # `uses:` references in the workflows and in the root action.yml
+  # (setup-node, cache, ...).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Python dependencies of the action (claudecode/requirements.txt).
+  - package-ecosystem: pip
+    directory: /claudecode
+    schedule:
+      interval: weekly
+    groups:
+      python-dependencies:
+        patterns: ["*"]
