@@ -24,8 +24,8 @@ inputs:
     default: '20'
   
   claude-api-key:
-    description: 'Anthropic Claude API key for security analysis'
-    required: true
+    description: 'Anthropic Claude API key for security analysis. Optional: if omitted, the action uses keyless / environment-based auth resolved by the Anthropic SDK and Claude CLI (e.g. Workload Identity Federation via ANTHROPIC_FEDERATION_RULE_ID / ANTHROPIC_ORGANIZATION_ID / ANTHROPIC_SERVICE_ACCOUNT_ID plus an OIDC identity token, or ANTHROPIC_AUTH_TOKEN). Set those in the calling workflow env when using keyless auth.'
+    required: false
     default: ''
 
   claude-model:
@@ -158,7 +158,7 @@ runs:
       if: steps.claudecode-check.outputs.enable_claudecode == 'true'
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 pinned to commit hash
       with:
-        node-version: '22' # claude-code requires Node >= 22
+        node-version: '22' # @anthropic-ai/claude-code requires Node >= 22
     
     - name: Install dependencies
       shell: bash
@@ -168,9 +168,10 @@ runs:
         echo "::group::Install Deps"
         if [ "${{ steps.claudecode-check.outputs.enable_claudecode }}" == "true" ]; then
           pip install -r "$ACTION_PATH/claudecode/requirements.txt"
-          # Pinned: the audit relies on this version's tool set (no Grep/Glob tools)
-          # and on --tools, --permission-mode dontAsk, --bare and --restricted
-          npm install -g @anthropic-ai/claude-code@2.1.308
+          # Pinned (npm 'stable' tag at the time): newer models need a recent CLI
+          # (claude-opus-5-5 needs >= 2.1.280), and an unpinned install is not reproducible.
+          npm install -g @anthropic-ai/claude-code@2.1.311
+          claude --version
         fi
         sudo apt-get update && sudo apt-get install -y jq
         echo "::endgroup::"
@@ -205,14 +206,14 @@ runs:
           exit 0
         fi
         
-        # Validate API key is provided
+        # Auth: a static ANTHROPIC_API_KEY is optional. If no key was provided,
+        # unset the (empty) variable so the Claude CLI and Anthropic SDK can
+        # resolve keyless credentials from the environment (e.g. Workload
+        # Identity Federation). An empty-but-set ANTHROPIC_API_KEY would
+        # otherwise take precedence over keyless auth and break it. Truly
+        # missing credentials are surfaced by the scan's own validation.
         if [ -z "$ANTHROPIC_API_KEY" ]; then
-          echo "::error::ANTHROPIC_API_KEY is not set. Please provide the claude-api-key input to the action."
-          echo "Example usage:"
-          echo "  - uses: anthropics/claude-code-security-reviewer@main"
-          echo "    with:"
-          echo "      claude-api-key: \$\{{ secrets.ANTHROPIC_API_KEY }}"
-          exit 1
+          unset ANTHROPIC_API_KEY
         fi
                 
         # Set timeout

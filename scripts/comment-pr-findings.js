@@ -184,6 +184,7 @@ async function run() {
     
     if (existingSecurityComments.length > 0) {
       console.log(`Found ${existingSecurityComments.length} existing security comments, skipping to avoid duplicates`);
+      console.log('::notice title=Security findings not posted::This PR already has security review comments, so the new findings were not posted. Delete all previous security review comments if you want to re-scan (resolving them is not enough).');
       return;
     }
         
