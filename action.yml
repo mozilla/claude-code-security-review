@@ -282,6 +282,9 @@ runs:
               
               # Also create findings.json for PR comment script
               jq '.findings // []' claudecode/claudecode-results.json > findings.json || echo '[]' > findings.json
+              # Only a completed scan may comment: on any other path the workspace
+              # could hold a findings.json committed in the PR itself.
+              echo "scan_succeeded=true" >> $GITHUB_OUTPUT
             fi
           fi
         else
@@ -321,7 +324,7 @@ runs:
         if-no-files-found: ignore
     
     - name: Comment PR with findings
-      if: github.event_name == 'pull_request' && inputs.comment-pr == 'true' && steps.claudecode-check.outputs.enable_claudecode == 'true'
+      if: github.event_name == 'pull_request' && inputs.comment-pr == 'true' && steps.claudecode-check.outputs.enable_claudecode == 'true' && steps.claudecode-scan.outputs.scan_succeeded == 'true'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
